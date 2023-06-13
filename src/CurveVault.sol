@@ -15,8 +15,6 @@ contract CurveVault is Ownable {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
-    // const uint256 CRV_TOKEN_ADDRESS = "0xD533a949740bb3306d119CC777fa900bA034cd52";
-
     // Info of each user.
     struct UserInfo {
         uint256 amount; // How many LP tokens the user has deposited.
