@@ -83,7 +83,6 @@ contract CurveVault is Ownable {
             return;
         }
 
-        console.log("Mint called");
         crvMinter.mint{gas: 30000000}(address(crvLiquidityGauge));
 
         uint256 earned = 0;
@@ -119,7 +118,6 @@ contract CurveVault is Ownable {
             .div(1e18)
             .sub(user.rewardDebt);
 
-        console.log("withdraw to harvest = %d", rewardsToHarvest);
 
         if (rewardsToHarvest == 0) {
             user.rewardDebt = accRewardPerShare.mul(user.amount).div(1e18);
@@ -143,7 +141,6 @@ contract CurveVault is Ownable {
     function deposit(uint256 _amount) public {
         UserInfo storage user = userInfo[msg.sender];
         harvestRewards();
-        console.log("block number = %d", block.number);
 
         if (_amount > 0) {
             // Transfer LP tokens to the vault and update the total deposited amount.
@@ -152,10 +149,6 @@ contract CurveVault is Ownable {
             // Deposit LP tokens into the Curve gauge pool.
             lpToken.approve(address(crvLiquidityGauge), _amount);
             crvLiquidityGauge.deposit(_amount);
-            console.log(
-                "gauge balance = %d",
-                lpToken.balanceOf(address(crvLiquidityGauge))
-            );
 
             user.amount = user.amount.add(_amount);
             user.rewardDebt = accRewardPerShare.mul(user.amount).div(1e18);
@@ -170,7 +163,7 @@ contract CurveVault is Ownable {
      * @param _amount The amount of LP tokens to withdraw.
      */
     function withdraw(uint256 _amount) public {
-        console.log("withdraw block number = %d", block.number);
+
         UserInfo storage user = userInfo[msg.sender];
 
         require(
