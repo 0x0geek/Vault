@@ -24,6 +24,11 @@ interface ICurvePool {
         bool
     ) external returns (uint256);
 
+    function add_liquidity(
+        uint256[3] memory,
+        uint256
+    ) external returns (uint256);
+
     function lp_token() external returns (address);
 }
 

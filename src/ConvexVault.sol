@@ -15,6 +15,9 @@ contract ConvexVault is Ownable {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
+    address private constant CONVEX_BOOSTER_ADDRESS =
+        0xF403C135812408BFbE8713b5A23a04b3D48AAE31;
+
     // Info of each user.
     struct UserInfo {
         uint256 amount; // How many LP tokens the user has provided.
@@ -26,20 +29,20 @@ contract ConvexVault is Ownable {
         IConvexRewardPool pool;
     }
 
+    uint256[] public lastRewardTimestamps;
+    uint256[] public accRewardPerShares; // Accumulated Rewards, times 1e18. See below.
+    RewardPoolInfo[] public rewardPools;
+    mapping(address => UserInfo) public userInfo;
+
     IERC20 public lpToken;
     IConvexBooster public booster;
-    uint256 private lastCVXBalance;
-    bool private cvxWithdraw;
-
-    uint256[] public lastRewardBlocks;
-    uint256[] public accRewardPerShares; // Accumulated SUSHIs per share, times 1e12. See below.
-    RewardPoolInfo[] public rewardPools;
-
-    mapping(address => UserInfo) public userInfo;
 
     uint256 public pid;
     uint256 public rewardTokenLength;
     uint256 public totalDepositAmount;
+
+    uint256 private lastCVXBalance;
+    bool private cvxWithdraw;
 
     event Deposit(address indexed user, uint256 amount);
     event Withdraw(address indexed user, uint256 amount);
@@ -49,9 +52,9 @@ contract ConvexVault is Ownable {
     error InsufficientBalance(uint256 available, uint256 requested);
     error UnauthorizedAccess(string message);
 
-    constructor(address _lpToken, address _booster, uint256 _pid) {
+    constructor(address _lpToken, uint256 _pid) {
         lpToken = IERC20(_lpToken);
-        booster = IConvexBooster(_booster);
+        booster = IConvexBooster(CONVEX_BOOSTER_ADDRESS);
         pid = _pid;
 
         require(pid < IConvexBooster(booster).poolLength(), "invalid pool id");
@@ -80,7 +83,7 @@ contract ConvexVault is Ownable {
         );
 
         for (uint256 i; i != rewardTokenLength; ++i) {
-            lastRewardBlocks.push(0);
+            lastRewardTimestamps.push(0);
             accRewardPerShares.push(0);
 
             if (i > 1) {
@@ -97,6 +100,10 @@ contract ConvexVault is Ownable {
         }
     }
 
+    /**
+        @dev Allows a user to deposit LP tokens into the farming pool and earn rewards.
+        @param _amount The amount of LP tokens to deposit 
+    */
     function deposit(uint256 _amount) public {
         UserInfo storage user = userInfo[msg.sender];
 
@@ -111,22 +118,24 @@ contract ConvexVault is Ownable {
                     user.rewardDebts[i]
                 );
 
-                safeRewardTransfer(
-                    rewardPools[i].rewardToken,
-                    msg.sender,
-                    pending
-                );
-
-                if (i == 0) {
-                    lastCVXBalance = rewardPools[i].rewardToken.balanceOf(
-                        address(this)
+                if (pending > 0) {
+                    safeRewardTransfer(
+                        rewardPools[i].rewardToken,
+                        msg.sender,
+                        pending
                     );
-                    cvxWithdraw = true;
-                }
 
-                user.rewardDebts[i] = accRewardPerShares[i]
-                    .mul(amountAfterDeposit)
-                    .div(1e18);
+                    if (i == 0) {
+                        lastCVXBalance = rewardPools[i].rewardToken.balanceOf(
+                            address(this)
+                        );
+                        cvxWithdraw = true;
+                    }
+
+                    user.rewardDebts[i] = accRewardPerShares[i]
+                        .mul(amountAfterDeposit)
+                        .div(1e18);
+                }
             } else {
                 user.rewardDebts = new uint256[](rewardTokenLength);
                 break;
@@ -145,6 +154,15 @@ contract ConvexVault is Ownable {
         emit Deposit(msg.sender, _amount);
     }
 
+    /**
+        @dev Allows a user to withdraw their deposited LP tokens from the pool along with any earned rewards. Updates the accumulated rewards
+        - for all reward tokens and stores them in the accRewardPerShares array. The function first checks if the user has sufficient balance
+        - before updating the rewards and withdrawing the LP tokens from the external staking contract and the MasterChef booster. It then calculates
+        - the pending rewards for each token and transfers them to the user before updating their reward debts based on the new deposit amount.
+        - Finally, it updates the user's deposit amount and the total deposit amount before emitting an event indicating that the withdrawal
+        has been processed successfully.
+        @param _amount The amount of LP tokens to be withdrawn by the user. 
+    */
     function withdraw(uint256 _amount) public {
         UserInfo storage user = userInfo[msg.sender];
 
@@ -192,6 +210,11 @@ contract ConvexVault is Ownable {
         emit Withdraw(msg.sender, _amount);
     }
 
+    /**
+        @dev Allows a user to claim their pending rewards for a specific reward token.
+        @param _rewardToken The address of the reward token to be claimed.
+        Emits a {ClaimReward} event indicating that the reward has been claimed by the user. 
+    */
     function claim(address _rewardToken) public {
         UserInfo storage user = userInfo[msg.sender];
 
@@ -206,12 +229,6 @@ contract ConvexVault is Ownable {
                 );
 
                 if (pending > 0) {
-                    safeRewardTransfer(
-                        rewardPools[i].rewardToken,
-                        msg.sender,
-                        pending
-                    );
-
                     if (i == 0) {
                         lastCVXBalance = rewardPools[i].rewardToken.balanceOf(
                             address(this)
@@ -237,15 +254,20 @@ contract ConvexVault is Ownable {
         emit ClaimReward(msg.sender, _rewardToken);
     }
 
-    // Update reward variables of the given pool to be up-to-date.
-    function updateReward() public {
+    /**
+        @dev Updates the accumulated rewards for all reward tokens and stores them in the accRewardPerShares array.
+        This function is internal and can only be called by other functions within the contract. It calculates the rewards earned
+        since the last update based on the deposit amount and time elapsed. If the reward token is CVX, it also checks if any CVX
+        has been withdrawn from the MasterChef pool since the last update and calculates the earned rewards accordingly. 
+    */
+    function updateReward() internal {
         for (uint256 i; i != rewardTokenLength; ++i) {
-            if (block.number <= lastRewardBlocks[i]) {
+            if (block.timestamp <= lastRewardTimestamps[i]) {
                 continue;
             }
 
             if (totalDepositAmount == 0) {
-                lastRewardBlocks[i] = block.number;
+                lastRewardTimestamps[i] = block.timestamp;
                 continue;
             }
 
@@ -269,7 +291,7 @@ contract ConvexVault is Ownable {
                 earned.mul(1e18).div(totalDepositAmount)
             );
 
-            lastRewardBlocks[i] = block.number;
+            lastRewardTimestamps[i] = block.timestamp;
         }
     }
 

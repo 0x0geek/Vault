@@ -1,4 +1,4 @@
-pragma solidity ^0.8.13;
+pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -15,6 +15,8 @@ contract CurveVault is Ownable {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
+    // const uint256 CRV_TOKEN_ADDRESS = "0xD533a949740bb3306d119CC777fa900bA034cd52";
+
     // Info of each user.
     struct UserInfo {
         uint256 amount; // How many LP tokens the user has deposited.
@@ -30,12 +32,9 @@ contract CurveVault is Ownable {
     IERC20 public lpToken;
 
     // Last block number that CRV distribution occurs.
-    uint256 public lastRewardBlock;
+    uint256 public lastRewardTimestamp;
 
-    // Last Balance for reward.
     uint256 private lastRewardBalance;
-
-    // Check if reward is withdrawn or not.
     bool private rewardWithdrawn;
 
     // The Curve gauge pool.
@@ -59,48 +58,15 @@ contract CurveVault is Ownable {
     // Events
     event Deposit(address indexed user, uint256 amount);
     event Withdraw(address indexed user, uint256 amount);
-    event Claim(address indexed user, uint256 amount);
+    event HarvestRewards(address indexed user, uint256 amount);
+
+    error InsufficientBalance();
 
     constructor(address _lpToken, address _curveGauge) {
         lpToken = IERC20(_lpToken);
         crvLiquidityGauge = ILiquidityGauge(_curveGauge);
         crvMinter = ICurveMinter(CRV_TOKEN_MINTER_ADDRESS);
         crvToken = ICurveToken(CRV_TOKEN_ADDRESS);
-    }
-
-    /**
-     * @dev Updates the CRV reward variables for the vault.
-     */
-    function updateReward() internal {
-        if (block.number <= lastRewardBlock) {
-            return;
-        }
-
-        if (totalDepositAmount == 0) {
-            lastRewardBlock = block.number;
-            return;
-        }
-
-        crvMinter.mint{gas: 30000000}(address(crvLiquidityGauge));
-
-        uint256 earned = 0;
-        uint256 currentBalance = getReward();
-
-        if (rewardWithdrawn == false && lastRewardBalance == currentBalance) {
-            earned = 0;
-        } else {
-            earned = currentBalance - lastRewardBalance;
-        }
-
-        accRewardPerShare = accRewardPerShare.add(
-            earned.mul(1e18).div(totalDepositAmount)
-        );
-
-        lastRewardBlock = block.number;
-    }
-
-    function getReward() internal returns (uint256) {
-        return crvToken.balanceOf(address(this));
     }
 
     /**
@@ -116,7 +82,6 @@ contract CurveVault is Ownable {
             .div(1e18)
             .sub(user.rewardDebt);
 
-
         if (rewardsToHarvest == 0) {
             user.rewardDebt = accRewardPerShare.mul(user.amount).div(1e18);
             return;
@@ -129,7 +94,7 @@ contract CurveVault is Ownable {
         lastRewardBalance = getReward();
         rewardWithdrawn = true;
 
-        emit Claim(msg.sender, rewardsToHarvest);
+        emit HarvestRewards(msg.sender, rewardsToHarvest);
     }
 
     /**
@@ -138,6 +103,7 @@ contract CurveVault is Ownable {
      */
     function deposit(uint256 _amount) public {
         UserInfo storage user = userInfo[msg.sender];
+
         harvestRewards();
 
         if (_amount > 0) {
@@ -161,13 +127,9 @@ contract CurveVault is Ownable {
      * @param _amount The amount of LP tokens to withdraw.
      */
     function withdraw(uint256 _amount) public {
-
         UserInfo storage user = userInfo[msg.sender];
 
-        require(
-            user.amount >= _amount,
-            "Vault: not enough balance to withdraw"
-        );
+        if (user.amount < _amount) revert InsufficientBalance();
 
         harvestRewards();
 
@@ -194,10 +156,34 @@ contract CurveVault is Ownable {
     }
 
     /**
-     * @dev Claims pending CRV rewards for the user.
+     * @dev Updates the CRV reward variables for the vault.
      */
-    function claim() public {
-        // emit Claim(msg.sender, pending);
+    function updateReward() internal {
+        if (block.timestamp <= lastRewardTimestamp) return;
+
+        if (totalDepositAmount == 0) {
+            lastRewardTimestamp = block.timestamp;
+            return;
+        }
+
+        crvMinter.mint(address(crvLiquidityGauge));
+
+        uint256 earned = 0;
+        uint256 currentBalance = getReward();
+
+        if (rewardWithdrawn == false && lastRewardBalance == currentBalance)
+            earned = 0;
+        else earned = currentBalance - lastRewardBalance;
+
+        accRewardPerShare = accRewardPerShare.add(
+            earned.mul(1e18).div(totalDepositAmount)
+        );
+
+        lastRewardTimestamp = block.timestamp;
+    }
+
+    function getReward() internal returns (uint256) {
+        return crvToken.balanceOf(address(this));
     }
 
     /**
@@ -212,9 +198,5 @@ contract CurveVault is Ownable {
         } else {
             crvToken.transfer(_to, _amount);
         }
-    }
-
-    function getCrvTokenBalance() public returns (uint256) {
-        return crvToken.balanceOf(msg.sender);
     }
 }
