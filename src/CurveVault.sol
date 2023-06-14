@@ -35,7 +35,7 @@ contract CurveVault is Ownable {
     uint256 public lastRewardTimestamp;
 
     uint256 private lastRewardBalance;
-    bool private rewardWithdrawn;
+    bool private needRewardWithdraw;
 
     // The Curve gauge pool.
     ILiquidityGauge public crvLiquidityGauge;
@@ -87,12 +87,11 @@ contract CurveVault is Ownable {
             return;
         }
 
-        user.rewardDebt = accRewardPerShare.mul(user.amount).div(1e18);
-
         safeCrvTransfer(msg.sender, rewardsToHarvest);
 
         lastRewardBalance = getReward();
-        rewardWithdrawn = true;
+
+        needRewardWithdraw = false;
 
         emit HarvestRewards(msg.sender, rewardsToHarvest);
     }
@@ -168,12 +167,15 @@ contract CurveVault is Ownable {
 
         crvMinter.mint(address(crvLiquidityGauge));
 
-        uint256 earned = 0;
+        uint256 earned;
         uint256 currentBalance = getReward();
 
-        if (rewardWithdrawn == false && lastRewardBalance == currentBalance)
+        if (needRewardWithdraw == true && lastRewardBalance == currentBalance) {
             earned = 0;
-        else earned = currentBalance - lastRewardBalance;
+        } else {
+            earned = currentBalance - lastRewardBalance;
+            needRewardWithdraw = true;
+        }
 
         accRewardPerShare = accRewardPerShare.add(
             earned.mul(1e18).div(totalDepositAmount)

@@ -18,6 +18,9 @@ contract ConvexVault is Ownable {
     address private constant CONVEX_BOOSTER_ADDRESS =
         0xF403C135812408BFbE8713b5A23a04b3D48AAE31;
 
+    uint256 private constant CVX_REWARD_POOL_INDEX = 0;
+    uint256 private constant CRV_REWARD_POOL_INDEX = 1;
+
     // Info of each user.
     struct UserInfo {
         uint256 amount; // How many LP tokens the user has provided.
@@ -38,26 +41,24 @@ contract ConvexVault is Ownable {
     IConvexBooster public booster;
 
     uint256 public pid;
-    uint256 public rewardTokenLength;
     uint256 public totalDepositAmount;
 
     uint256 private lastCVXBalance;
-    bool private cvxWithdraw;
+    bool private needCVXWithdraw;
 
     event Deposit(address indexed user, uint256 amount);
     event Withdraw(address indexed user, uint256 amount);
     event ClaimReward(address indexed user, address rewardToken);
 
-    error InvalidRewardData();
+    error InvalidPoolId();
     error InsufficientBalance(uint256 available, uint256 requested);
-    error UnauthorizedAccess(string message);
 
     constructor(address _lpToken, uint256 _pid) {
         lpToken = IERC20(_lpToken);
         booster = IConvexBooster(CONVEX_BOOSTER_ADDRESS);
         pid = _pid;
 
-        require(pid < IConvexBooster(booster).poolLength(), "invalid pool id");
+        if (pid > IConvexBooster(booster).poolLength()) revert InvalidPoolId();
 
         (, , , address _crvRewards, , ) = IConvexBooster(booster).poolInfo(pid);
 
@@ -67,7 +68,7 @@ contract ConvexVault is Ownable {
         );
 
         uint256 extraRewardLength = baseRewardPool.extraRewardsLength();
-        rewardTokenLength = extraRewardLength.add(2);
+        uint256 rewardTokenCount = extraRewardLength.add(2);
 
         rewardPools.push(
             RewardPoolInfo({
@@ -82,7 +83,7 @@ contract ConvexVault is Ownable {
             })
         );
 
-        for (uint256 i; i != rewardTokenLength; ++i) {
+        for (uint256 i; i != rewardTokenCount; ++i) {
             lastRewardTimestamps.push(0);
             accRewardPerShares.push(0);
 
@@ -109,10 +110,11 @@ contract ConvexVault is Ownable {
 
         updateReward();
 
-        uint256 pending = 0;
+        uint256 pending;
         uint256 amountAfterDeposit = user.amount.add(_amount);
+        uint256 rewardTokenCount = rewardPools.length;
 
-        for (uint256 i; i < rewardTokenLength; ++i) {
+        for (uint256 i; i < rewardTokenCount; ++i) {
             if (user.amount > 0) {
                 pending = accRewardPerShares[i].mul(user.amount).div(1e18).sub(
                     user.rewardDebts[i]
@@ -125,11 +127,12 @@ contract ConvexVault is Ownable {
                         pending
                     );
 
-                    if (i == 0) {
+                    // CVX RewardPool's index is 0
+                    if (i == CVX_REWARD_POOL_INDEX) {
                         lastCVXBalance = rewardPools[i].rewardToken.balanceOf(
                             address(this)
                         );
-                        cvxWithdraw = true;
+                        needCVXWithdraw = false;
                     }
 
                     user.rewardDebts[i] = accRewardPerShares[i]
@@ -137,7 +140,7 @@ contract ConvexVault is Ownable {
                         .div(1e18);
                 }
             } else {
-                user.rewardDebts = new uint256[](rewardTokenLength);
+                user.rewardDebts = new uint256[](rewardTokenCount);
                 break;
             }
         }
@@ -146,7 +149,6 @@ contract ConvexVault is Ownable {
             lpToken.safeTransferFrom(msg.sender, address(this), _amount);
             lpToken.safeApprove(address(booster), _amount);
             booster.deposit(pid, _amount, true);
-
             user.amount = user.amount.add(_amount);
             totalDepositAmount = totalDepositAmount.add(_amount);
         }
@@ -166,17 +168,19 @@ contract ConvexVault is Ownable {
     function withdraw(uint256 _amount) public {
         UserInfo storage user = userInfo[msg.sender];
 
-        require(user.amount >= _amount, "Insufficient balance");
+        if (user.amount < _amount)
+            revert InsufficientBalance(user.amount, _amount);
 
         updateReward();
 
-        rewardPools[1].pool.withdraw(_amount, true);
+        rewardPools[CRV_REWARD_POOL_INDEX].pool.withdraw(_amount, true);
         booster.withdraw(pid, _amount);
 
-        uint256 pending = 0;
+        uint256 pending;
         uint256 amountAfterWithdraw = user.amount.sub(_amount);
+        uint256 rewardTokenCount = rewardPools.length;
 
-        for (uint256 i; i != rewardTokenLength; ++i) {
+        for (uint256 i; i != rewardTokenCount; ++i) {
             if (user.amount > 0) {
                 pending = accRewardPerShares[i].mul(user.amount).div(1e18).sub(
                     user.rewardDebts[i]
@@ -189,11 +193,11 @@ contract ConvexVault is Ownable {
                         pending
                     );
 
-                    if (i == 0) {
+                    if (i == CVX_REWARD_POOL_INDEX) {
                         lastCVXBalance = rewardPools[i].rewardToken.balanceOf(
                             address(this)
                         );
-                        cvxWithdraw = true;
+                        needCVXWithdraw = false;
                     }
                 }
             }
@@ -203,8 +207,8 @@ contract ConvexVault is Ownable {
                 .div(1e18);
         }
 
-        lpToken.safeTransfer(address(msg.sender), _amount);
         user.amount = user.amount.sub(_amount);
+        lpToken.safeTransfer(address(msg.sender), _amount);
         totalDepositAmount = totalDepositAmount.sub(_amount);
 
         emit Withdraw(msg.sender, _amount);
@@ -220,20 +224,21 @@ contract ConvexVault is Ownable {
 
         updateReward();
 
-        uint256 pending = 0;
+        uint256 pending;
+        uint256 rewardTokenCount = rewardPools.length;
 
-        for (uint256 i; i != rewardTokenLength; ++i) {
+        for (uint256 i; i != rewardTokenCount; ++i) {
             if (address(rewardPools[i].rewardToken) == _rewardToken) {
                 pending = accRewardPerShares[i].mul(user.amount).div(1e18).sub(
                     user.rewardDebts[i]
                 );
 
                 if (pending > 0) {
-                    if (i == 0) {
+                    if (i == CVX_REWARD_POOL_INDEX) {
                         lastCVXBalance = rewardPools[i].rewardToken.balanceOf(
                             address(this)
                         );
-                        cvxWithdraw = true;
+                        needCVXWithdraw = false;
                     }
 
                     safeRewardTransfer(
@@ -261,7 +266,9 @@ contract ConvexVault is Ownable {
         has been withdrawn from the MasterChef pool since the last update and calculates the earned rewards accordingly. 
     */
     function updateReward() internal {
-        for (uint256 i; i != rewardTokenLength; ++i) {
+        uint256 rewardTokenCount = rewardPools.length;
+
+        for (uint256 i; i != rewardTokenCount; ++i) {
             if (block.timestamp <= lastRewardTimestamps[i]) {
                 continue;
             }
@@ -271,16 +278,18 @@ contract ConvexVault is Ownable {
                 continue;
             }
 
-            uint256 earned = 0;
+            uint256 earned;
 
-            if (i == 0) {
+            if (i == CVX_REWARD_POOL_INDEX) {
                 uint256 cvxBalance = rewardPools[i].rewardToken.balanceOf(
                     address(this)
                 );
-                if (cvxWithdraw == false && lastCVXBalance == cvxBalance) {
+
+                if (needCVXWithdraw == true && lastCVXBalance == cvxBalance) {
                     earned = 0;
                 } else {
                     earned = cvxBalance - lastCVXBalance;
+                    needCVXWithdraw = true;
                 }
             } else {
                 earned = rewardPools[i].pool.earned(address(this));
